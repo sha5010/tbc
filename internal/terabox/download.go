@@ -246,7 +246,7 @@ func (c *Client) Download(ctx context.Context, downloadFiles []DownloadFile, rec
 		fileName := dLink.FileName
 		outputPath := path.Join(outputDir, fileName)
 
-		file, err := os.Create(outputPath)
+		file, err := os.OpenFile(outputPath, os.O_CREATE | os.O_RDWR, 0o666)
 		if err != nil {
 			return err
 		}
@@ -258,8 +258,46 @@ func (c *Client) Download(ctx context.Context, downloadFiles []DownloadFile, rec
 			}
 		}
 
+		var numChunks int64 = 1
+		if downloadConcurrency > 1 {
+			numChunks = (fileSize + downloadChunkSize - 1) / downloadChunkSize
+		}
+		chunkSize := int64(math.Ceil(float64(fileSize) / float64(numChunks)))
+
+		var incompleteChunks []int64 = make([]int64, 0, numChunks)
+		var alreadyDownloadedChunks = int64(0)
+		resumeFile, err := os.OpenFile(outputPath + ".resume", os.O_CREATE | os.O_RDWR, 0o666)
+		if err != nil {
+			return err
+		}
+		defer resumeFile.Close()
+		resumeFileInfo, err := resumeFile.Stat()
+		if err != nil {
+			return err
+		}
+		if resumeFileInfo.Size() == numChunks {
+			data, err := io.ReadAll(resumeFile)
+			if err != nil {
+				return err
+			}
+
+			for i, b := range data {
+				if b == 0 {
+					incompleteChunks = append(incompleteChunks, int64(i))
+				} else {
+					alreadyDownloadedChunks++
+				}
+			}
+		} else {
+			resumeFile.Truncate(0)
+			resumeFile.Truncate(numChunks)
+			for i := int64(0); i < numChunks; i++ {
+				incompleteChunks = append(incompleteChunks, i)
+			}
+		}
+
 		fileCnt += 1
-		totalBar, _ := p.Add(fileSize,
+		totalBar, _ := p.Add(fileSize - alreadyDownloadedChunks * chunkSize,
 			mpb.BarStyle().Lbound("[").Filler("=").Tip(">").Padding("-").Rbound("]").Build(),
 			mpb.BarPriority(fileCnt*1000),
 			mpb.PrependDecorators(
@@ -276,24 +314,17 @@ func (c *Client) Download(ctx context.Context, downloadFiles []DownloadFile, rec
 			),
 		)
 
-		chunkCount := 0
-		var numChunks int64 = 1
-		if downloadConcurrency > 1 {
-			numChunks = (fileSize + downloadChunkSize - 1) / downloadChunkSize
-		}
-		chunkSize := int64(math.Ceil(float64(fileSize) / float64(numChunks)))
-
 		sem := make(chan struct{}, downloadConcurrency)
 		g, ctx := errgroup.WithContext(ctx)
 
-		for start := int64(0); start < fileSize; start += chunkSize {
-			start := start
+		for _, chunkNo := range incompleteChunks {
+			chunkNo := chunkNo
+			start := chunkNo * chunkSize
 			end := start + chunkSize - 1
 			if end >= fileSize {
 				end = fileSize - 1
 			}
-			chunkNo := chunkCount + 1
-			barPriority := fileCnt*1000 + chunkNo
+			barPriority := fileCnt*1000 + int(chunkNo)
 
 			sem <- struct{}{}
 			g.Go(func() error {
@@ -342,6 +373,14 @@ func (c *Client) Download(ctx context.Context, downloadFiles []DownloadFile, rec
 					return fmt.Errorf("Invalid status code: %d", resp.StatusCode)
 				}
 
+				// sometimes we see errors such as this, with successful status codes:
+				// {"errno":424629,"errmsg":"need verify","request_id":9145275833161802533}
+				// and that's why we check for short-reads
+
+				if end-start+1 != resp.ContentLength {
+					return fmt.Errorf("Invalid request payload size: %d (expected %d), status: %d", resp.ContentLength, end-start+1, resp.StatusCode)
+				}
+
 				pw := &progressWriter{
 					writer:   &offsetWriter{file: file, offset: start},
 					totalBar: totalBar,
@@ -352,9 +391,10 @@ func (c *Client) Download(ctx context.Context, downloadFiles []DownloadFile, rec
 					return fmt.Errorf("Failed to write response: %w", err)
 				}
 
+				resumeFile.WriteAt([]byte{1}, chunkNo)
+				resumeFile.Sync()
 				return nil
 			})
-			chunkCount++
 		}
 
 		if err := g.Wait(); err != nil {
