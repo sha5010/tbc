@@ -24,6 +24,45 @@ Para os comandos de montagem, normalmente é necessário ter um dos binários ab
 - fusermount3
 - fusermount
 
+## Compatibilidade por Plataforma
+
+O projeto tem builds configuradas para:
+
+- Linux
+- Windows
+- macOS
+
+E também pode ser usado em VPS ou servidores remotos para fluxos sem interface gráfica.
+
+### O que funciona de forma geral
+
+Estas partes fazem sentido como cliente CLI multiplataforma:
+
+- autenticação por cookie
+- login manual
+- login via servidor web local com --web
+- operações de arquivo via API do TeraBox
+- uso em VPS e ambientes headless
+
+### O que hoje é Linux-cêntrico
+
+As partes abaixo estão implementadas com dependências específicas de Linux e ambiente desktop Linux:
+
+- montagem como drive via FUSE
+- leitura de /proc/mounts
+- uso de fusermount ou fusermount3
+- integração com systemd --user
+- abertura automática com xdg-open
+
+Na prática, isso significa:
+
+- Linux desktop: suportado para CLI e montagem como drive
+- Linux VPS: suportado para CLI, login via --web ou --manual e automações; montagem depende de FUSE disponível no servidor
+- Windows: o binário pode ser gerado, mas a experiência de mount como drive não está implementada neste código do jeito que está
+- macOS: o binário pode ser gerado, mas a parte de montagem e integrações de desktop ainda não está adaptada para macOS
+
+Se o objetivo for usar o projeto em Windows ou macOS hoje, trate-o principalmente como cliente CLI do TeraBox. Se o objetivo for montar como drive, a implementação atual está voltada para Linux.
+
 ## Estrutura Padrão
 
 O projeto usa estes caminhos padrão no diretório home:
